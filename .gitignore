@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.venv/
+.env
+
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# embedded Qdrant storage and model cache
+data/
+models/
+
+.idea/
+.vscode/
+.DS_Store
