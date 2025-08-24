@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from askdocs.config import Settings
+from askdocs.__main__ import main
+from askdocs.config import Settings, get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -121,3 +122,21 @@ def test_log_level_is_case_insensitive(monkeypatch):
 def test_webhook_with_secret():
     settings = load(webhook_url="https://example.com", webhook_secret="abc_DEF-123")
     assert settings.webhook_secret.get_secret_value() == "abc_DEF-123"
+
+
+def test_config_error_does_not_print_secrets(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "sk-very-secret-value")
+    monkeypatch.setenv("WEBHOOK_SECRET", "secret with spaces")
+    monkeypatch.setenv("CHUNK_SIZE", "lots")
+    get_settings.cache_clear()
+    try:
+        assert main() == 2
+    finally:
+        get_settings.cache_clear()
+    err = capsys.readouterr().err
+    assert "WEBHOOK_SECRET:" in err
+    assert "CHUNK_SIZE:" in err
+    assert "secret with spaces" not in err
+    assert "lots" not in err
+    assert "sk-very-secret-value" not in err
