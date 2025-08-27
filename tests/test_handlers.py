@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import (
     AnswerCallbackQuery,
     EditMessageText,
+    GetChatMember,
     GetFile,
     SendMessage,
 )
@@ -19,9 +20,12 @@ from helpers import FakeLLM, MockedSession, make_pdf
 from askdocs.bot import texts
 from askdocs.bot.app import create_dispatcher
 from askdocs.bot.handlers import common, documents, questions
+from askdocs.bot.handlers.documents import ClearDocs, DeleteDoc
 from askdocs.config import Settings
 from askdocs.rag import service
 from askdocs.rag.llm import LLMError, LLMOutOfTokensError, LLMTimeoutError
+from askdocs.rag.service import ChatBusyError
+from askdocs.rag.store import DocumentInfo
 
 USER_ID = 10
 GROUP = {"chat_type": "supergroup", "chat_id": -100}
@@ -346,6 +350,118 @@ async def test_allowlist_is_silent_in_groups(make_dp, bot, session):
     dp = make_dp(allowed_user_ids=[USER_ID])
     await dp.feed_update(bot, message_update("/ask что-нибудь", user_id=777, **GROUP))
     assert session.requests == []
+
+
+async def test_docs_list_and_delete_button(dp, bot, session, rag):
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    await upload(dp, bot, session, "b.txt", "Второй документ про доставку.".encode())
+
+    await dp.feed_update(bot, message_update("/docs"))
+    listing = session.requests[-1]
+    assert isinstance(listing, SendMessage)
+    assert "1. a.md — фрагментов: 2" in listing.text
+    assert "2. b.txt — фрагментов: 1" in listing.text
+    buttons = [row[0] for row in listing.reply_markup.inline_keyboard]
+    assert [b.text for b in buttons] == ["Удалить 1. a.md", "Удалить 2. b.txt"]
+
+    await dp.feed_update(bot, callback_update(buttons[0].callback_data))
+    assert popups(session)[0].text == texts.DELETED.format(name="a.md")
+    edited = session.requests[-1]
+    assert isinstance(edited, EditMessageText)
+    assert "1. b.txt" in edited.text
+    assert [d.file_name for d in await rag.list_documents(USER_ID)] == ["b.txt"]
+
+
+async def test_delete_popup_fits_telegram_limit(dp, bot, session):
+    name = "очень длинное имя файла " * 20 + ".txt"
+    await upload(dp, bot, session, name, "Текст про доставку.".encode())
+    await dp.feed_update(bot, message_update("/docs"))
+    button = session.requests[-1].reply_markup.inline_keyboard[0][0]
+    await dp.feed_update(bot, callback_update(button.callback_data))
+    assert len(popups(session)[0].text) <= 200
+
+
+def test_docs_list_fits_one_message():
+    docs = [DocumentInfo(f"d{i}", "имя" * 85, 50, "0" * 64, datetime.now(UTC)) for i in range(30)]
+    text, markup = documents.docs_view(docs)
+    assert len(text) <= 4096
+    assert len(markup.inline_keyboard) == 30
+
+
+@pytest.mark.parametrize("button", ["delete", "clear"])
+async def test_buttons_during_upload(dp, bot, session, rag, monkeypatch, button):
+    async def busy(*args):
+        raise ChatBusyError
+
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    [doc] = await rag.list_documents(USER_ID)
+    monkeypatch.setattr(rag, "delete_document", busy)
+    monkeypatch.setattr(rag, "clear", busy)
+    data = DeleteDoc(doc_id=doc.doc_id) if button == "delete" else ClearDocs(confirm=True)
+    await dp.feed_update(bot, callback_update(data.pack()))
+    assert [(p.text, p.show_alert) for p in popups(session)] == [(texts.BUSY, True)]
+    assert len(await rag.list_documents(USER_ID)) == 1
+
+
+async def test_delete_button_for_missing_document(dp, bot, session):
+    await dp.feed_update(bot, callback_update(DeleteDoc(doc_id="gone").pack()))
+    assert popups(session)[0].text == texts.DELETE_NOT_FOUND
+
+
+async def test_clear_with_confirmation(dp, bot, session, rag):
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    await dp.feed_update(bot, message_update("/clear"))
+    assert session.texts()[-1] == texts.CLEAR_CONFIRM.format(count=1)
+
+    await dp.feed_update(bot, callback_update(ClearDocs(confirm=False).pack()))
+    assert session.texts()[-1] == texts.CLEAR_CANCELLED
+    assert len(await rag.list_documents(USER_ID)) == 1
+
+    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack()))
+    assert session.texts()[-1] == texts.CLEAR_DONE.format(count=1)
+    assert await rag.list_documents(USER_ID) == []
+
+
+async def test_group_members_cannot_delete(dp, bot, session, rag):
+    await upload(dp, bot, session, "a.md", CONTRACT, **GROUP)
+    [doc] = await rag.list_documents(-100)
+
+    await dp.feed_update(bot, message_update("/clear", **GROUP))
+    assert session.texts()[-1] == texts.ADMIN_ONLY
+
+    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack(), **GROUP))
+    await dp.feed_update(bot, callback_update(DeleteDoc(doc_id=doc.doc_id).pack(), **GROUP))
+    assert [(p.text, p.show_alert) for p in popups(session)] == [(texts.ADMIN_ONLY, True)] * 2
+    assert len(await rag.list_documents(-100)) == 1
+
+
+async def test_group_admin_can_clear(dp, bot, session, rag):
+    session.admins.add(USER_ID)
+    await upload(dp, bot, session, "a.md", CONTRACT, **GROUP)
+    await dp.feed_update(bot, message_update("/clear", **GROUP))
+    assert session.texts()[-1] == texts.CLEAR_CONFIRM.format(count=1)
+    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack(), **GROUP))
+    assert await rag.list_documents(-100) == []
+
+
+async def test_anonymous_group_admin_can_clear(dp, bot, session):
+    await upload(dp, bot, session, "a.md", CONTRACT, **GROUP)
+    group = Chat(id=-100, type="supergroup")
+    await dp.feed_update(bot, message_update("/clear", sender_chat=group, **GROUP))
+    assert session.texts()[-1] == texts.CLEAR_CONFIRM.format(count=1)
+    assert not any(isinstance(r, GetChatMember) for r in session.requests)
+
+
+async def test_unexpected_error_is_reported(dp, bot, session, rag, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("store is down")
+
+    monkeypatch.setattr(rag, "list_documents", boom)
+    await dp.feed_update(bot, message_update("/docs"))
+    assert session.texts() == [texts.ERROR]
+
+    await dp.feed_update(bot, callback_update(DeleteDoc(doc_id="x").pack()))
+    assert [(p.text, p.show_alert) for p in popups(session)] == [(texts.ERROR, True)]
 
 
 async def test_group_upgraded_to_supergroup(dp, bot, session, rag):

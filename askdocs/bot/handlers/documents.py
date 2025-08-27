@@ -5,10 +5,12 @@ from html import escape
 import aiohttp
 import structlog
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatType
+from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import Document, InlineKeyboardMarkup, Message
+from aiogram.filters.callback_data import CallbackData
+from aiogram.types import CallbackQuery, Chat, Document, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from askdocs.bot import texts
 from askdocs.bot.handlers.questions import answer_question
@@ -20,6 +22,7 @@ from askdocs.rag.parsing import (
     is_supported,
 )
 from askdocs.rag.service import (
+    ChatBusyError,
     DocumentLimitError,
     DuplicateDocumentError,
     RagService,
@@ -31,7 +34,17 @@ router = Router(name="documents")
 
 DOWNLOAD_TIMEOUT = 120
 PROGRESS_INTERVAL = 3.0
+# Telegram cuts callback popups at 200 characters.
+POPUP_NAME_LIMIT = 150
 LIST_NAME_LIMIT = 60
+
+
+class DeleteDoc(CallbackData, prefix="del"):
+    doc_id: str
+
+
+class ClearDocs(CallbackData, prefix="clear"):
+    confirm: bool
 
 
 @router.message(F.document.file_name.func(is_supported), flags={"rate_limit": True})
@@ -127,11 +140,90 @@ async def cmd_docs(message: Message, rag: RagService) -> None:
     if not docs:
         await message.answer(texts.NO_DOCS)
         return
-    await message.answer(docs_view(docs))
+    text, markup = docs_view(docs)
+    await message.answer(text, reply_markup=markup)
 
 
-def docs_view(docs: list[DocumentInfo]) -> str:
+@router.callback_query(DeleteDoc.filter())
+async def on_delete(
+    callback: CallbackQuery, callback_data: DeleteDoc, bot: Bot, rag: RagService
+) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    chat = callback.message.chat
+    if not await _is_admin(bot, chat, callback.from_user.id):
+        await callback.answer(texts.ADMIN_ONLY, show_alert=True)
+        return
+
+    docs = await rag.list_documents(chat.id)
+    doc = next((d for d in docs if d.doc_id == callback_data.doc_id), None)
+    try:
+        deleted = doc is not None and await rag.delete_document(chat.id, doc.doc_id)
+    except ChatBusyError:
+        await callback.answer(texts.BUSY, show_alert=True)
+        return
+    if not deleted:
+        await callback.answer(texts.DELETE_NOT_FOUND)
+    else:
+        await callback.answer(texts.DELETED.format(name=_shorten(doc.file_name, POPUP_NAME_LIMIT)))
+
+    remaining = [d for d in docs if d.doc_id != callback_data.doc_id]
+    if remaining:
+        text, markup = docs_view(remaining)
+        await _safe_edit(callback.message, text, markup)
+    else:
+        await _safe_edit(callback.message, texts.NO_DOCS, None)
+
+
+@router.message(Command("clear"))
+async def cmd_clear(message: Message, bot: Bot, rag: RagService) -> None:
+    # An anonymous group admin writes on behalf of the group itself.
+    anonymous_admin = message.sender_chat is not None and message.sender_chat.id == message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    if not anonymous_admin and not await _is_admin(bot, message.chat, user_id):
+        await message.answer(texts.ADMIN_ONLY)
+        return
+
+    docs = await rag.list_documents(message.chat.id)
+    if not docs:
+        await message.answer(texts.NO_DOCS)
+        return
+    builder = InlineKeyboardBuilder()
+    builder.button(text=texts.CLEAR_YES, callback_data=ClearDocs(confirm=True))
+    builder.button(text=texts.CLEAR_NO, callback_data=ClearDocs(confirm=False))
+    await message.answer(
+        texts.CLEAR_CONFIRM.format(count=len(docs)), reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(ClearDocs.filter())
+async def on_clear(
+    callback: CallbackQuery, callback_data: ClearDocs, bot: Bot, rag: RagService
+) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    chat = callback.message.chat
+    if not await _is_admin(bot, chat, callback.from_user.id):
+        await callback.answer(texts.ADMIN_ONLY, show_alert=True)
+        return
+    if callback_data.confirm:
+        try:
+            removed = await rag.clear(chat.id)
+        except ChatBusyError:
+            await callback.answer(texts.BUSY, show_alert=True)
+            return
+        text = texts.CLEAR_DONE.format(count=removed)
+    else:
+        text = texts.CLEAR_CANCELLED
+    await callback.answer()
+    await _safe_edit(callback.message, text, None)
+
+
+def docs_view(docs: list[DocumentInfo]) -> tuple[str, InlineKeyboardMarkup]:
     lines = [texts.DOCS_HEADER.format(count=len(docs))]
+    builder = InlineKeyboardBuilder()
     for number, doc in enumerate(docs, start=1):
         lines.append(
             texts.DOCS_ITEM.format(
@@ -141,9 +233,21 @@ def docs_view(docs: list[DocumentInfo]) -> str:
                 date=doc.uploaded_at.strftime("%d.%m.%Y"),
             )
         )
+        builder.button(
+            text=texts.DELETE_BUTTON.format(number=number, name=_shorten(doc.file_name, 40)),
+            callback_data=DeleteDoc(doc_id=doc.doc_id),
+        )
+    builder.adjust(1)
     lines.append("")
     lines.append(texts.DOCS_FOOTER)
-    return "\n".join(lines)
+    return "\n".join(lines), builder.as_markup()
+
+
+async def _is_admin(bot: Bot, chat: Chat, user_id: int) -> bool:
+    if chat.type == ChatType.PRIVATE:
+        return True
+    member = await bot.get_chat_member(chat.id, user_id)
+    return member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR)
 
 
 def _shorten(text: str, limit: int) -> str:
