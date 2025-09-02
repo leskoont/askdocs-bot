@@ -8,6 +8,16 @@ Telegram-бот, который отвечает на вопросы по при
 
 Нужен токен бота от [@BotFather](https://t.me/BotFather) и доступ к LLM: локальный Ollama или ключ OpenAI-совместимого API. Все параметры с пояснениями перечислены в [`.env.example`](.env.example).
 
+### Docker
+
+```bash
+cp .env.example .env      # вписать BOT_TOKEN и параметры LLM
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+Поднимаются бот и Qdrant, данные Qdrant и кэш модели эмбеддингов лежат в volumes. Модель скачивается при первом запуске. По умолчанию бот ищет Ollama на хост-машине по адресу `http://host.docker.internal:11434/v1`. На Linux Ollama по умолчанию слушает только `127.0.0.1`, и из контейнера её не видно: запустите её с `OLLAMA_HOST=0.0.0.0`.
+
 ### Без Docker
 
 Python 3.11–3.13.
