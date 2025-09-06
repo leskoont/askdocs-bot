@@ -1,5 +1,7 @@
+import codecs
 import io
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import PurePath
 
@@ -11,6 +13,13 @@ from pypdf import PdfReader
 SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md")
 
 MIN_TEXT_CHARS = 20
+
+# Single-byte encodings Russian text files still come in (Windows, old Unix, DOS).
+_LEGACY_ENCODINGS = ("cp1251", "koi8_r", "cp866")
+# The wrong ones turn these frequent lowercase letters into capitals or pseudographics.
+_RU_COMMON = frozenset("оеаинтсрвлкмдпу")
+_GARBLED = re.compile("[\ufffd\u2500-\u259f]")
+_HIGH_BYTES = bytes(range(0x80, 0x100))
 
 
 class ParseError(Exception):
@@ -64,7 +73,37 @@ def parse_document(file_name: str, data: bytes, max_chars: int | None = None) ->
 
 
 def decode_text(data: bytes) -> str:
-    return data.decode("utf-8-sig", errors="replace")
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = data.decode("utf-16", errors="replace")
+    elif b"\x00" in data[:8192]:
+        raise ParseError("binary data in a text file")
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8-sig", errors="replace")
+            # A stray broken byte doesn't make a UTF-8 file cp1251. One cp1251 word in Latin
+            # text does: there nearly every non-ASCII byte fails to decode.
+            bad = text.count("\ufffd")
+            non_ascii = len(data) - len(data.translate(None, _HIGH_BYTES))
+            if bad > 1 and bad * 10 > non_ascii:
+                candidates = [data.decode(enc, errors="replace") for enc in _LEGACY_ENCODINGS]
+                text = max(candidates, key=_russian_score)
+
+    sample = text[:8192]
+    junk = sum(1 for ch in sample if ch == "\ufffd" or _is_control(ch))
+    if junk > len(sample) / 100:
+        raise ParseError("text file is binary or in an unknown encoding")
+    return text
+
+
+def _russian_score(text: str) -> int:
+    sample = text[:8192]
+    return sum(ch in _RU_COMMON for ch in sample) - 2 * len(_GARBLED.findall(sample))
+
+
+def _is_control(ch: str) -> bool:
+    return ch not in "\t\n\r\f" and unicodedata.category(ch) == "Cc"
 
 
 def _parse_pdf(data: bytes, max_chars: int | None) -> list[Section]:

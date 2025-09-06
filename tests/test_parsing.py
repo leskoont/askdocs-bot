@@ -26,6 +26,11 @@ def test_txt_utf8():
     assert sections[0].page is None
 
 
+def test_txt_utf8_bom_and_cp1251():
+    assert parse_document("a.txt", "﻿текст".encode())[0].text == "текст"
+    assert parse_document("a.txt", "Съешь же ещё".encode("cp1251"))[0].text == "Съешь же ещё"
+
+
 def test_markdown_sections_by_heading():
     md = (
         "Вступление без заголовка.\n\n"
@@ -100,6 +105,11 @@ def test_unsupported_format():
 TEXT = "Съешь же ещё этих мягких французских булок, да выпей чаю."
 
 
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "cp1251", "koi8_r", "cp866", "utf-16"])
+def test_txt_encodings(encoding):
+    assert parse_document("a.txt", TEXT.encode(encoding))[0].text == TEXT
+
+
 @pytest.mark.parametrize("text", [TEXT, "The “quick” brown fox — jumps over the dog."])
 def test_utf8_with_one_broken_byte(text):
     data = (text * 5).encode()
@@ -114,6 +124,25 @@ def test_utf8_glued_to_cp1251_is_not_read_as_koi8():
     decoded = parse_document("a.txt", data)[0].text
     assert TEXT in decoded
     assert not any("\u2500" <= ch <= "\u259f" for ch in decoded)
+
+
+def test_cp1251_word_in_latin_text():
+    text = "Invoice INV-0042\n" + "Hosting, 1 month, 100 USD.\n" * 150
+    text += "Итого: 1800 USD\n"
+    assert parse_document("a.txt", text.encode("cp1251"))[0].text == text
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256)),
+        b"PK\x03\x04\x14\x00\x00\x00\x08\x00" + bytes(range(256)),
+    ],
+    ids=["png", "zip"],
+)
+def test_binary_file_renamed_to_txt(data):
+    with pytest.raises(ParseError):
+        parse_document("notes.txt", data)
 
 
 def encrypt(pdf: bytes, algorithm: str, user_password: str = "") -> bytes:
