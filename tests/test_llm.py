@@ -2,7 +2,13 @@ import httpx
 import openai
 import pytest
 
-from askdocs.rag.llm import LLMClient, LLMError, LLMTimeoutError
+from askdocs.rag.llm import (
+    LLMClient,
+    LLMError,
+    LLMOutOfTokensError,
+    LLMTimeoutError,
+    strip_reasoning,
+)
 
 
 def completion(content: str | None, finish_reason: str = "stop") -> dict:
@@ -46,6 +52,20 @@ async def test_returns_content_and_sends_model():
     assert seen["auth"] == "Bearer key"
 
 
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("<think>\nhmm\n</think>\nИтог [2].", "Итог [2]."),
+        ("<think>a</think><think>b</think> Итог", "Итог"),
+        ("Итог [1].\n<think>ещё подумаю", "Итог [1]."),
+        ("<think>так и не закончил", ""),
+        ("Без рассуждений", "Без рассуждений"),
+    ],
+)
+def test_strip_reasoning(raw, clean):
+    assert strip_reasoning(raw) == clean
+
+
 async def test_timeout_is_not_retried():
     calls = []
 
@@ -72,6 +92,25 @@ async def test_http_errors(status):
     with pytest.raises(LLMError) as info:
         await client.complete([])
     assert not isinstance(info.value, LLMTimeoutError)
+
+
+@pytest.mark.parametrize("content", ["<think>x</think>", None, "   "])
+async def test_empty_answer_is_an_error(content):
+    client = client_with(lambda r: httpx.Response(200, json=completion(content)))
+    with pytest.raises(LLMError):
+        await client.complete([])
+
+
+async def test_answer_cut_by_max_tokens_is_marked():
+    client = client_with(lambda r: httpx.Response(200, json=completion("Срок — 30", "length")))
+    assert await client.complete([]) == "Срок — 30…"
+
+
+async def test_reasoning_that_used_up_max_tokens_is_an_error():
+    reply = completion("<think>долгие размышления", "length")
+    client = client_with(lambda r: httpx.Response(200, json=reply))
+    with pytest.raises(LLMOutOfTokensError):
+        await client.complete([])
 
 
 async def test_other_openai_errors(monkeypatch):

@@ -63,10 +63,33 @@ class LLMClient:
 
         if not response.choices:
             raise LLMError("llm returned no choices")
-        content = (response.choices[0].message.content or "").strip()
+        choice = response.choices[0]
+        content = strip_reasoning(choice.message.content or "")
+        usage = response.usage
+        if usage is not None:
+            log.debug(
+                "llm usage",
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+            )
+        if choice.finish_reason == "length":
+            if not content:
+                raise LLMOutOfTokensError("llm used up max_tokens before answering")
+            log.warning("llm answer cut by max_tokens", max_tokens=self._max_tokens)
+            content += "…"
         if not content:
             raise LLMError("llm returned empty answer")
         return content
 
     async def close(self) -> None:
         await self._client.close()
+
+
+def strip_reasoning(text: str) -> str:
+    # Reasoning models (qwen3, deepseek-r1) served through Ollama may inline their thoughts;
+    # an unclosed <think> means the answer was cut off while still thinking.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    elif "<think>" in text:
+        text = text.split("<think>", 1)[0]
+    return text.strip()
