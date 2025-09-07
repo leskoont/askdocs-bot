@@ -28,7 +28,11 @@ class SentenceTransformerEmbedder:
         from sentence_transformers import SentenceTransformer
 
         log.info("loading embedding model", model=model_name, device=device or "auto")
-        self._model = SentenceTransformer(model_name, device=device)
+        try:
+            # Skip the round trip to the Hugging Face Hub when the model is already cached.
+            self._model = SentenceTransformer(model_name, device=device, local_files_only=True)
+        except OSError:
+            self._model = SentenceTransformer(model_name, device=device)
         self._batch_size = batch_size
         self._query_prefix = query_prefix
         self._passage_prefix = passage_prefix
