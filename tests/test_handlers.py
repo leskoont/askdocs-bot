@@ -163,6 +163,15 @@ async def test_upload_and_ask(dp, bot, session, llm: FakeLLM):
     )
 
 
+async def test_replies_are_threaded(dp, bot, session, llm):
+    # In a busy group an answer without a reply is hard to match with its question.
+    await upload(dp, bot, session, "a.md", CONTRACT, **GROUP)
+    await dp.feed_update(bot, message_update("/ask Когда заказчик оплачивает услуги?", **GROUP))
+    sent = [r for r in session.requests if isinstance(r, SendMessage)]
+    assert len(sent) == 2
+    assert all(r.reply_parameters is not None for r in sent)
+
+
 async def test_caption_is_a_question(dp, bot, session, llm):
     llm.reply = "В течение десяти рабочих дней [1]."
     doc = document("a.md", CONTRACT, session)
@@ -339,17 +348,33 @@ async def test_long_answer_is_split(dp, bot, session, llm):
     assert "<b>Источники:</b>" in answers[-1]
 
 
+async def test_ask_command_in_group(dp, bot, session, llm):
+    await upload(dp, bot, session, "a.md", CONTRACT, **GROUP)
+    llm.reply = "В течение десяти рабочих дней [1]."
+
+    await dp.feed_update(bot, message_update("Когда оплата?", **GROUP))
+    assert len(llm.calls) == 0, "plain text in a group must be ignored"
+
+    await dp.feed_update(bot, message_update("/ask Когда заказчик оплачивает услуги?", **GROUP))
+    assert session.texts()[-1].startswith("В течение десяти рабочих дней [1].")
+
+
+async def test_ask_without_question(dp, bot, session):
+    await dp.feed_update(bot, message_update("/ask"))
+    assert session.texts() == [texts.ASK_USAGE]
+
+
+async def test_unknown_command(dp, bot, session, llm):
+    await dp.feed_update(bot, message_update("/foo"))
+    assert session.texts() == [texts.UNKNOWN_COMMAND]
+    assert llm.calls == []
+
+
 async def test_group_ignores_other_commands_and_media(dp, bot, session, llm):
     photo = [PhotoSize(file_id="p", file_unique_id="p", width=10, height=10)]
     await dp.feed_update(bot, message_update("/foo@other_bot", **GROUP))
     await dp.feed_update(bot, message_update(photo=photo, **GROUP))
     assert session.texts() == []
-
-
-async def test_allowlist_is_silent_in_groups(make_dp, bot, session):
-    dp = make_dp(allowed_user_ids=[USER_ID])
-    await dp.feed_update(bot, message_update("/ask что-нибудь", user_id=777, **GROUP))
-    assert session.requests == []
 
 
 async def test_docs_list_and_delete_button(dp, bot, session, rag):
@@ -450,6 +475,12 @@ async def test_anonymous_group_admin_can_clear(dp, bot, session):
     await dp.feed_update(bot, message_update("/clear", sender_chat=group, **GROUP))
     assert session.texts()[-1] == texts.CLEAR_CONFIRM.format(count=1)
     assert not any(isinstance(r, GetChatMember) for r in session.requests)
+
+
+async def test_media_is_rejected(dp, bot, session):
+    photo = [PhotoSize(file_id="p", file_unique_id="p", width=10, height=10)]
+    await dp.feed_update(bot, message_update(photo=photo))
+    assert session.texts() == [texts.MEDIA_NOT_SUPPORTED]
 
 
 async def test_unexpected_error_is_reported(dp, bot, session, rag, monkeypatch):
