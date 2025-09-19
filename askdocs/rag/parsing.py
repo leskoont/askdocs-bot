@@ -182,7 +182,12 @@ def _parse_docx(data: bytes, max_chars: int | None) -> list[Section]:
 
 
 def _table_row(row) -> str:
-    texts = [cell.text.strip() for cell in row.cells]
+    # A horizontally merged cell is returned once per grid column it spans.
+    cells = []
+    for cell in row.cells:
+        if not cells or cell._tc is not cells[-1]._tc:
+            cells.append(cell)
+    texts = [cell.text.strip() for cell in cells]
     return " | ".join(texts) if any(texts) else ""
 
 

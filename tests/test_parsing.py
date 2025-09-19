@@ -1,5 +1,6 @@
 import io
 
+import docx
 import pytest
 from helpers import make_docx, make_pdf
 from pypdf import PdfReader, PdfWriter
@@ -167,6 +168,19 @@ def test_pdf_with_user_password():
     data = encrypt(make_pdf([["Payment is due within ten days."]]), "AES-256", "secret")
     with pytest.raises(ParseError):
         parse_document("a.pdf", data)
+
+
+def test_docx_merged_cells_are_not_repeated():
+    document = docx.Document()
+    table = document.add_table(rows=3, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 2)).text = "Этапы работ"
+    table.cell(1, 0).text, table.cell(1, 1).text, table.cell(1, 2).text = "Этап", "Срок", ""
+    table.cell(2, 0).text, table.cell(2, 1).text = "Дизайн", "5 дней"
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    text = parse_document("t.docx", buffer.getvalue())[0].text
+    assert text.splitlines() == ["Этапы работ", "Этап | Срок | ", "Дизайн | 5 дней | "]
 
 
 def test_long_documents_stop_early():
