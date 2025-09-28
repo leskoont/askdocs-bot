@@ -35,6 +35,24 @@ services:
     # ports:
     #   - "127.0.0.1:6333:6333"
 
+  # Local LLM with an NVIDIA GPU: uncomment this service and the volume, then see README.
+  # ollama:
+  #   image: ollama/ollama:0.12.0
+  #   restart: unless-stopped
+  #   environment:
+  #     OLLAMA_CONTEXT_LENGTH: 8192
+  #     OLLAMA_KEEP_ALIVE: 30m
+  #   volumes:
+  #     - ollama:/root/.ollama
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+
 volumes:
   qdrant:
   models:
+  # ollama:
