@@ -15,6 +15,9 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+    # Uncomment for webhook mode (WEBHOOK_URL must point to a reverse proxy in front of this port)
+    # ports:
+    #   - "8080:8080"
 
   qdrant:
     image: qdrant/qdrant:v1.15.3

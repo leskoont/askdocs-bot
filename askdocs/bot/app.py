@@ -1,13 +1,22 @@
+import asyncio
+import contextlib
+import signal
 
 import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, ErrorEvent
+from aiohttp import web
 from qdrant_client import QdrantClient
 
 from askdocs.bot import texts
 from askdocs.bot.handlers import build_router
+from askdocs.bot.middlewares import (
+    AccessMiddleware,
+    RateLimiter,
+    ThrottlingMiddleware,
+)
 from askdocs.config import Settings
 from askdocs.rag.embeddings import SentenceTransformerEmbedder
 from askdocs.rag.llm import LLMClient
@@ -37,6 +46,12 @@ def create_bot(settings: Settings) -> Bot:
 
 def create_dispatcher(settings: Settings, rag: RagService) -> Dispatcher:
     dp = Dispatcher(settings=settings, rag=rag)
+
+    access = AccessMiddleware(set(settings.allowed_user_ids))
+    dp.message.outer_middleware(access)
+    dp.callback_query.outer_middleware(access)
+    limiter = RateLimiter(settings.rate_limit_requests, settings.rate_limit_period)
+    dp.message.middleware(ThrottlingMiddleware(limiter))
 
     dp.include_router(build_router())
     dp.errors.register(on_error)
@@ -110,11 +125,52 @@ async def run(settings: Settings) -> None:
         dp = create_dispatcher(settings, rag)
         await bot.set_my_commands(COMMANDS)
         try:
-            await bot.delete_webhook()
-            log.info("starting polling")
-            await dp.start_polling(bot, close_bot_session=False)
+            if settings.webhook_url:
+                await _run_webhook(bot, dp, settings)
+            else:
+                await bot.delete_webhook()
+                log.info("starting polling")
+                await dp.start_polling(bot, close_bot_session=False)
         finally:
             await rag.llm.close()
             rag.store.close()
     finally:
         await bot.session.close()
+
+
+async def _run_webhook(bot: Bot, dp: Dispatcher, settings: Settings) -> None:
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+    secret = settings.webhook_secret.get_secret_value()
+    url = settings.webhook_url.rstrip("/") + settings.webhook_path
+
+    async def on_startup() -> None:
+        await bot.set_webhook(
+            url, secret_token=secret, allowed_updates=dp.resolve_used_update_types()
+        )
+
+    dp.startup.register(on_startup)
+
+    app = web.Application()
+    # before the request handler: its shutdown hook waits for running updates
+    setup_application(app, dp, bot=bot)
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=secret).register(
+        app, path=settings.webhook_path
+    )
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop.set)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, settings.webapp_host, settings.webapp_port)
+    await site.start()
+    log.info("webhook server started", url=url, port=settings.webapp_port)
+    try:
+        await stop.wait()
+        log.info("stopping")
+    finally:
+        await runner.cleanup()

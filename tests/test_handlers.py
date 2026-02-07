@@ -239,6 +239,20 @@ async def test_unsupported_file_is_not_downloaded(dp, bot, session):
     assert not any(isinstance(r, GetFile) for r in session.requests)
 
 
+async def test_unsupported_file_in_group_is_ignored(make_dp, bot, session):
+    dp = make_dp(rate_limit_requests=1, rate_limit_period=60)
+    for _ in range(3):
+        await upload(dp, bot, session, "table.xlsx", b"PK\x03\x04", **GROUP)
+    assert session.requests == []
+
+    # the ignored files did not use up the limit
+    await dp.feed_update(bot, message_update("/ask Когда оплата?", **GROUP))
+    assert session.texts() == [texts.NO_DOCS]
+    # and a throttled user is not answered in a group either
+    await dp.feed_update(bot, message_update("/ask Когда оплата?", **GROUP))
+    assert session.texts() == [texts.NO_DOCS]
+
+
 async def test_new_version_of_a_file(dp, bot, session, rag):
     await upload(dp, bot, session, "a.md", CONTRACT)
     await upload(dp, bot, session, "a.md", CONTRACT + "Приложение 1.\n".encode())
@@ -375,6 +389,33 @@ async def test_group_ignores_other_commands_and_media(dp, bot, session, llm):
     await dp.feed_update(bot, message_update("/foo@other_bot", **GROUP))
     await dp.feed_update(bot, message_update(photo=photo, **GROUP))
     assert session.texts() == []
+
+
+async def test_rate_limit(make_dp, bot, session):
+    dp = make_dp(rate_limit_requests=2, rate_limit_period=60)
+    for _ in range(3):
+        await dp.feed_update(bot, message_update("вопрос"))
+    replies = session.texts()
+    assert replies[:2] == [texts.NO_DOCS, texts.NO_DOCS]
+    assert replies[2].startswith("Слишком много запросов")
+    # commands without the rate_limit flag still work
+    await dp.feed_update(bot, message_update("/start"))
+    assert session.texts()[-1] == texts.START
+
+
+async def test_allowlist(make_dp, bot, session):
+    dp = make_dp(allowed_user_ids=[USER_ID])
+    await dp.feed_update(bot, message_update("/start", user_id=777, chat_id=777))
+    assert session.texts() == [texts.ACCESS_DENIED.format(user_id=777)]
+
+    await dp.feed_update(bot, message_update("/start"))
+    assert session.texts()[-1] == texts.START
+
+
+async def test_allowlist_is_silent_in_groups(make_dp, bot, session):
+    dp = make_dp(allowed_user_ids=[USER_ID])
+    await dp.feed_update(bot, message_update("/ask что-нибудь", user_id=777, **GROUP))
+    assert session.requests == []
 
 
 async def test_docs_list_and_delete_button(dp, bot, session, rag):
