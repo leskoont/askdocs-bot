@@ -113,6 +113,12 @@ async def test_reasoning_that_used_up_max_tokens_is_an_error():
         await client.complete([])
 
 
+async def test_html_page_instead_of_api():
+    client = client_with(lambda r: httpx.Response(200, text="<html>Welcome</html>"))
+    with pytest.raises(LLMError, match="LLM_BASE_URL"):
+        await client.complete([])
+
+
 async def test_other_openai_errors(monkeypatch):
     client = client_with(lambda r: httpx.Response(200, json=completion("x")))
 

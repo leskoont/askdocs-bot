@@ -2,6 +2,7 @@ import httpx
 import openai
 import structlog
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletion
 
 log = structlog.get_logger(__name__)
 
@@ -61,6 +62,9 @@ class LLMClient:
             log.warning("llm call failed", exc_info=True)
             raise LLMError(f"llm call failed: {exc}") from exc
 
+        # a wrong LLM_BASE_URL often answers 200 with an html page, which openai returns as str
+        if not isinstance(response, ChatCompletion):
+            raise LLMError(f"llm returned {type(response).__name__}, check LLM_BASE_URL")
         if not response.choices:
             raise LLMError("llm returned no choices")
         choice = response.choices[0]
