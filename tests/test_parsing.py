@@ -1,10 +1,12 @@
 import io
+import zipfile
 
 import docx
 import pytest
 from helpers import make_docx, make_pdf
 from pypdf import PdfReader, PdfWriter
 
+from askdocs.rag import parsing
 from askdocs.rag.parsing import (
     DocumentTooLargeError,
     EmptyDocumentError,
@@ -181,6 +183,27 @@ def test_docx_merged_cells_are_not_repeated():
 
     text = parse_document("t.docx", buffer.getvalue())[0].text
     assert text.splitlines() == ["Этапы работ", "Этап | Срок | ", "Дизайн | 5 дней | "]
+
+
+def test_docx_unpacked_limit(monkeypatch):
+    monkeypatch.setattr(parsing, "MAX_DOCX_UNPACKED", 10_000)
+    with pytest.raises(DocumentTooLargeError) as exc:
+        parse_document("big.docx", make_docx([("p", "Абзац.")]))
+    assert exc.value.unpacked
+
+
+def test_docx_with_huge_image_is_rejected():
+    # python-docx would read the whole image into memory
+    out = io.BytesIO(make_docx([("p", "Абзац.")]))
+    with (
+        zipfile.ZipFile(out, "a", zipfile.ZIP_DEFLATED) as archive,
+        archive.open("word/media/image1.png", "w", force_zip64=True) as image,
+    ):
+        for _ in range(parsing.MAX_DOCX_UNPACKED // 2**20 + 1):
+            image.write(bytes(2**20))
+    assert len(out.getvalue()) < 2**20
+    with pytest.raises(DocumentTooLargeError):
+        parse_document("big.docx", out.getvalue())
 
 
 def test_long_documents_stop_early():

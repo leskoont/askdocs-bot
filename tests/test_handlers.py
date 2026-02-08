@@ -15,14 +15,14 @@ from aiogram.methods import (
     SendMessage,
 )
 from aiogram.types import CallbackQuery, Chat, Document, Message, PhotoSize, Update, User
-from helpers import FakeLLM, MockedSession, make_pdf
+from helpers import FakeLLM, MockedSession, make_docx, make_pdf
 
 from askdocs.bot import texts
 from askdocs.bot.app import create_dispatcher
 from askdocs.bot.handlers import common, documents, questions
 from askdocs.bot.handlers.documents import ClearDocs, DeleteDoc
 from askdocs.config import Settings
-from askdocs.rag import service
+from askdocs.rag import parsing, service
 from askdocs.rag.llm import LLMError, LLMOutOfTokensError, LLMTimeoutError
 from askdocs.rag.service import ChatBusyError
 from askdocs.rag.store import DocumentInfo
@@ -289,6 +289,12 @@ async def test_too_long_document(make_dp, bot, session, rag):
     text = "\n\n".join(f"Абзац {i}. " + "текст " * 50 for i in range(80))
     await upload(dp, bot, session, "big.txt", text.encode())
     assert session.texts()[-1] == texts.UPLOAD_TOO_LONG.format(limit=50)
+
+
+async def test_docx_too_heavy_after_unpacking(dp, bot, session, monkeypatch):
+    monkeypatch.setattr(parsing, "MAX_DOCX_UNPACKED", 10_000)
+    await upload(dp, bot, session, "big.docx", make_docx([("p", "Абзац.")]))
+    assert session.texts()[-1] == texts.UPLOAD_TOO_HEAVY
 
 
 async def test_download_failure(dp, bot, session, monkeypatch):

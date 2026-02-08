@@ -2,6 +2,7 @@ import codecs
 import io
 import re
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from pathlib import PurePath
 
@@ -13,6 +14,8 @@ from pypdf import PdfReader
 SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md")
 
 MIN_TEXT_CHARS = 20
+# python-docx keeps every part of the package in memory, images included
+MAX_DOCX_UNPACKED = 64 * 2**20
 
 # Single-byte encodings Russian text files still come in (Windows, old Unix, DOS).
 _LEGACY_ENCODINGS = ("cp1251", "koi8_r", "cp866")
@@ -142,6 +145,10 @@ def _fix_pdf_text(text: str) -> str:
 
 def _parse_docx(data: bytes, max_chars: int | None) -> list[Section]:
     try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            unpacked = sum(i.file_size for i in archive.infolist())
+        if unpacked > MAX_DOCX_UNPACKED:
+            raise DocumentTooLargeError(f"docx unpacks to {unpacked} bytes", unpacked=True)
         document = docx.Document(io.BytesIO(data))
         styles = {s.style_id: s.name.lower() for s in document.styles if s.name}
     except ParseError:
