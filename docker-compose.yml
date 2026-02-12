@@ -3,6 +3,8 @@ services:
     build: .
     restart: unless-stopped
     init: true
+    # Lets questions in progress finish after `docker compose stop`.
+    stop_grace_period: 60s
     env_file: .env
     environment:
       QDRANT_URL: http://qdrant:6333

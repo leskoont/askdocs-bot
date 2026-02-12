@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 from datetime import UTC, datetime
 
@@ -356,6 +357,14 @@ async def test_llm_failures(dp, bot, session, llm, error, reply):
     llm.error = error
     await dp.feed_update(bot, message_update("Когда заказчик оплачивает услуги?"))
     assert session.texts()[-1] == reply
+
+
+async def test_question_cancelled_by_shutdown(dp, bot, session, llm):
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    llm.error = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await dp.feed_update(bot, message_update("Когда заказчик оплачивает услуги?"))
+    assert session.texts()[-1] == texts.RESTARTING
 
 
 async def test_long_answer_is_split(dp, bot, session, llm):

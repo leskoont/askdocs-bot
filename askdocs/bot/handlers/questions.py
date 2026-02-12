@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import suppress
 
 import structlog
 from aiogram import Bot, F, Router
@@ -75,6 +77,10 @@ async def answer_question(message: Message, question: str, bot: Bot, rag: RagSer
         else:
             await message.reply(texts.LLM_FAILED)
         return
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await message.reply(texts.RESTARTING)
+        raise
 
     if not answer.found:
         await message.reply(texts.NOT_FOUND)

@@ -14,6 +14,7 @@ from askdocs.bot import texts
 from askdocs.bot.handlers import build_router
 from askdocs.bot.middlewares import (
     AccessMiddleware,
+    InFlightMiddleware,
     RateLimiter,
     ThrottlingMiddleware,
 )
@@ -32,6 +33,9 @@ COMMANDS = [
     BotCommand(command="help", description="Справка"),
 ]
 
+# Docker sends SIGKILL 60 s after SIGTERM (stop_grace_period in docker-compose.yml).
+SHUTDOWN_TIMEOUT = 50
+
 
 def create_bot(settings: Settings) -> Bot:
     return Bot(
@@ -46,6 +50,14 @@ def create_bot(settings: Settings) -> Bot:
 
 def create_dispatcher(settings: Settings, rag: RagService) -> Dispatcher:
     dp = Dispatcher(settings=settings, rag=rag)
+
+    inflight = InFlightMiddleware()
+    dp.update.outer_middleware(inflight)
+
+    async def on_shutdown() -> None:
+        await inflight.drain(SHUTDOWN_TIMEOUT)
+
+    dp.shutdown.register(on_shutdown)
 
     access = AccessMiddleware(set(settings.allowed_user_ids))
     dp.message.outer_middleware(access)
