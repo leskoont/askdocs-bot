@@ -1,3 +1,4 @@
+import asyncio
 import math
 import time
 from collections import deque
@@ -69,3 +70,33 @@ class ThrottlingMiddleware(BaseMiddleware):
         if isinstance(event, Message) and event.chat.type == "private":
             await event.answer(texts.RATE_LIMITED.format(seconds=math.ceil(wait)))
         return None
+
+
+class InFlightMiddleware(BaseMiddleware):
+    """Remembers the tasks processing updates so shutdown can let them finish."""
+
+    def __init__(self):
+        self.tasks: set[asyncio.Task] = set()
+
+    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        task = asyncio.current_task()
+        if task is None:
+            return await handler(event, data)
+        self.tasks.add(task)
+        try:
+            return await handler(event, data)
+        finally:
+            self.tasks.discard(task)
+
+    async def drain(self, grace: float) -> None:
+        current = asyncio.current_task()
+        pending = self.tasks - {current}
+        if not pending:
+            return
+        log.info("waiting for updates in progress", count=len(pending))
+        _, pending = await asyncio.wait(pending, timeout=grace)
+        for task in pending:
+            task.cancel()
+        if pending:
+            log.warning("cancelled unfinished updates", count=len(pending))
+            await asyncio.wait(pending, timeout=5)
