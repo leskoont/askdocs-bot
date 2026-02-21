@@ -50,6 +50,8 @@ class RateLimiter:
         if len(window) >= self.limit:
             return self.period - (now - window[0])
         window.append(now)
+        if len(self._hits) > 10_000:
+            self._hits = {k: w for k, w in self._hits.items() if now - w[-1] < self.period}
         return 0.0
 
 
