@@ -43,6 +43,7 @@ include = ["askdocs*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning:pypdf.*"]
 
 [tool.ruff]
 line-length = 100
