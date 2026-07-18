@@ -22,7 +22,7 @@ services:
     #   - "8080:8080"
 
   qdrant:
-    image: qdrant/qdrant:v1.16.3
+    image: qdrant/qdrant:v1.18.0
     restart: unless-stopped
     volumes:
       - qdrant:/qdrant/storage
@@ -42,7 +42,7 @@ services:
 
   # Local LLM with an NVIDIA GPU: uncomment this service and the volume, then see README.
   # ollama:
-  #   image: ollama/ollama:0.12.0
+  #   image: ollama/ollama:0.20.0
   #   restart: unless-stopped
   #   environment:
   #     OLLAMA_CONTEXT_LENGTH: 8192
