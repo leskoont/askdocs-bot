@@ -1,10 +1,26 @@
 import logging
+import re
 import sys
+from collections.abc import Iterable
 
 import structlog
 
+# Bot API URLs carry the token (".../bot123:abc/getFile"), and aiohttp puts them into errors.
+_TOKEN = re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{30,}|(?<=/bot)\d+:[^/\s]+")
 
-def setup_logging(level: str = "INFO", fmt: str = "console") -> None:
+
+def _redactor(secrets: Iterable[str]):
+    secrets = sorted({s for s in secrets if len(s) >= 8}, key=len, reverse=True)
+
+    def redact(_logger, _name, line: str) -> str:
+        for secret in secrets:
+            line = line.replace(secret, "***")
+        return _TOKEN.sub("***", line)
+
+    return redact
+
+
+def setup_logging(level: str = "INFO", fmt: str = "console", secrets: Iterable[str] = ()) -> None:
     shared = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
@@ -38,6 +54,7 @@ def setup_logging(level: str = "INFO", fmt: str = "console") -> None:
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             *render,
+            _redactor(secrets),
         ],
     )
     handler = logging.StreamHandler()

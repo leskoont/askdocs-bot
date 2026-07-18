@@ -22,7 +22,17 @@ def main() -> int:
             print(f"  {field}: {error['msg']}", file=sys.stderr)
         return 2
 
-    setup_logging(settings.log_level, settings.log_format)
+    secrets = [
+        settings.bot_token,
+        settings.llm_api_key,
+        settings.webhook_secret,
+        settings.qdrant_api_key,
+    ]
+    setup_logging(
+        settings.log_level,
+        settings.log_format,
+        secrets=[s.get_secret_value() for s in secrets if s is not None],
+    )
     log = structlog.get_logger("askdocs")
 
     try:
