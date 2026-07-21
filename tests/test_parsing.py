@@ -1,5 +1,7 @@
 import io
+import tracemalloc
 import zipfile
+import zlib
 
 import docx
 import pytest
@@ -204,6 +206,39 @@ def test_docx_with_huge_image_is_rejected():
     assert len(out.getvalue()) < 2**20
     with pytest.raises(DocumentTooLargeError):
         parse_document("big.docx", out.getvalue())
+
+
+def lying_docx(padding: int) -> bytes:
+    # word/document.xml inflates to `padding` more bytes than its header says,
+    # with a CRC that matches the declared part
+    src = zipfile.ZipFile(io.BytesIO(make_docx([("p", "Абзац.")])))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in src.infolist():
+            body = src.read(info)
+            if info.filename != "word/document.xml":
+                archive.writestr(info.filename, body)
+                continue
+            with archive.open(info.filename, "w") as entry:
+                entry.write(body)
+                for _ in range(padding // 2**20):
+                    entry.write(bytes(2**20))
+            lie = archive.getinfo(info.filename)
+            lie.file_size, lie.CRC = len(body), zlib.crc32(body)
+    return out.getvalue()
+
+
+def test_docx_entry_larger_than_declared_is_not_inflated():
+    data = lying_docx(32 * 2**20)
+    assert len(data) < 2**20
+    tracemalloc.start()
+    try:
+        sections = parse_document("lie.docx", data)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert sections[0].text == "Абзац."
+    assert peak < 8 * 2**20
 
 
 def test_long_documents_stop_early():

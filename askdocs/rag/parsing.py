@@ -16,6 +16,7 @@ SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md")
 MIN_TEXT_CHARS = 20
 # python-docx keeps every part of the package in memory, images included
 MAX_DOCX_UNPACKED = 64 * 2**20
+_DOCX_READ = 2**20
 
 # Single-byte encodings Russian text files still come in (Windows, old Unix, DOS).
 _LEGACY_ENCODINGS = ("cp1251", "koi8_r", "cp866")
@@ -143,13 +144,36 @@ def _fix_pdf_text(text: str) -> str:
     return re.sub(r"(\w)-\n(\w)", r"\1\2", text)
 
 
+def _unpack_docx(data: bytes) -> io.BytesIO:
+    # The sizes in zip headers can lie, and zipfile inflates up to 1 GiB in a single
+    # read() before cutting an entry to its declared size. So copy every entry in small
+    # reads, count what really comes out, and let python-docx open the copy.
+    copy = io.BytesIO()
+    total = 0
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(copy, "w") as dst:
+        # honest sizes are enough to turn most heavy files away without unpacking
+        if sum(i.file_size for i in src.infolist()) > MAX_DOCX_UNPACKED:
+            raise DocumentTooLargeError("docx unpacks too large", unpacked=True)
+        for info in src.infolist():
+            if info.is_dir():
+                continue
+            size = 0
+            with src.open(info) as entry, dst.open(info.filename, "w") as out:
+                while chunk := entry.read(_DOCX_READ):
+                    size += len(chunk)
+                    total += len(chunk)
+                    if total > MAX_DOCX_UNPACKED:
+                        raise DocumentTooLargeError("docx unpacks too large", unpacked=True)
+                    if size > info.file_size:
+                        raise ParseError(f"{info.filename} is larger than declared")
+                    out.write(chunk)
+    copy.seek(0)
+    return copy
+
+
 def _parse_docx(data: bytes, max_chars: int | None) -> list[Section]:
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            unpacked = sum(i.file_size for i in archive.infolist())
-        if unpacked > MAX_DOCX_UNPACKED:
-            raise DocumentTooLargeError(f"docx unpacks to {unpacked} bytes", unpacked=True)
-        document = docx.Document(io.BytesIO(data))
+        document = docx.Document(_unpack_docx(data))
         styles = {s.style_id: s.name.lower() for s in document.styles if s.name}
     except ParseError:
         raise
