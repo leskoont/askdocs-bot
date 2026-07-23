@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qm
 
 from askdocs.rag import prompts
+from askdocs.rag import store as store_module
 from askdocs.rag.parsing import DocumentTooLargeError, EmptyDocumentError, Section
 from askdocs.rag.retrieval import fit_to_budget, mmr
 from askdocs.rag.service import (
@@ -343,14 +344,41 @@ async def test_startup_drops_documents_broken_by_a_crash(rag: RagService, embedd
         await stored(doc_id)
     # killed in the middle of mark_ready
     client.set_payload(collection, {"ready": False}, points=chunk("half", 0))
-    # killed in the middle of a delete, after the points were unmarked
-    client.set_payload(collection, {"ready": False}, points=doc("lost"))
+    # killed in the middle of a delete, after chunk 0 was unmarked
+    client.set_payload(collection, {"ready": False}, points=chunk("lost", 0))
     client.delete(collection, points_selector=qm.FilterSelector(filter=chunk("lost", 2)))
     client.delete_payload(collection, ["ready"], points=chunk("legacy", 1))
 
     await rag.store.setup(create_indexes=False)
     assert [d.doc_id for d in await rag.list_documents(1)] == ["whole"]
     assert await points(rag) == 3
+
+
+async def test_delete_unmarks_chunk_zero_first_and_removes_it_last(rag: RagService, monkeypatch):
+    await rag.add_document(1, "a.md", CONTRACT.encode())
+    await rag.add_document(1, "b.txt", RECIPE.encode())
+    client = rag.store._client
+    records, _ = client.scroll(rag.store._collection, limit=100, with_payload=True)
+    index = {r.id: r.payload["chunk_index"] for r in records}
+
+    calls = []
+    for name in ("set_payload", "delete"):
+        original = getattr(client, name)
+
+        def record(*args, _name=name, _original=original, **kwargs):
+            calls.append((_name, kwargs))
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(client, name, record)
+    monkeypatch.setattr(store_module, "_DELETE_BATCH", 1)
+
+    assert await rag.clear(1) == 2
+    assert [name for name, _ in calls] == ["set_payload"] + ["delete"] * len(index)
+    unmarked = calls[0][1]["points"].must[-1]
+    assert (unmarked.key, unmarked.match.value) == ("chunk_index", 0)
+    order = [index[kw["points_selector"].points[0]] for _, kw in calls[1:]]
+    assert order[-2:] == [0, 0] and 0 not in order[:-2]
+    assert await points(rag) == 0
 
 
 async def test_buttons_do_not_wait_for_an_upload(rag: RagService, monkeypatch):

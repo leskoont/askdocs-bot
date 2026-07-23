@@ -214,12 +214,15 @@ class RagService:
         async with self._lock(old_chat_id):
             await self.store.move_chat(old_chat_id, new_chat_id)
 
+    def is_busy(self, chat_id: int) -> bool:
+        lock = self._chat_locks.get(chat_id)
+        return lock is not None and lock.locked()
+
     def _free_lock(self, chat_id: int) -> asyncio.Lock:
         # an upload can hold the lock for minutes, a button press can't wait that long
-        lock = self._lock(chat_id)
-        if lock.locked():
+        if self.is_busy(chat_id):
             raise ChatBusyError
-        return lock
+        return self._lock(chat_id)
 
 
 def _label(hit: Hit) -> str:

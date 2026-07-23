@@ -15,6 +15,7 @@ from askdocs.rag.parsing import Section
 log = structlog.get_logger(__name__)
 
 _READY = qm.FieldCondition(key="ready", match=qm.MatchValue(value=True))
+_DELETE_BATCH = 128
 
 
 class StoreConfigError(Exception):
@@ -90,7 +91,7 @@ class ChunkStore:
 
     async def _drop_incomplete(self) -> None:
         # An interrupted upload or delete always leaves unready points behind:
-        # mark_ready flips chunk 0 last, and _delete unmarks before deleting.
+        # mark_ready flips chunk 0 last, and _delete unmarks it first.
         records = await self._scroll_all(qm.Filter(must_not=[_READY]), with_payload=["doc_id"])
         for doc_id in {r.payload["doc_id"] for r in records if r.payload.get("doc_id")}:
             log.warning("dropping incomplete document", doc_id=doc_id)
@@ -197,10 +198,17 @@ class ChunkStore:
         return removed
 
     async def _delete(self, flt: qm.Filter) -> None:
-        # Embedded qdrant deletes point by point. Unmark first, so that a crash
-        # halfway leaves points that are hidden and dropped on the next start.
-        await self._call(self._client.set_payload, {"ready": False}, points=flt, wait=True)
-        await self._call(self._client.delete, points_selector=qm.FilterSelector(filter=flt))
+        # Embedded qdrant deletes point by point. Chunk 0 is what lists a document,
+        # so it is unmarked first and deleted last: a crash halfway leaves an unready
+        # chunk 0, and setup() drops the rest of that document on the next start.
+        heads = qm.Filter(must=[*flt.must, _index_is(0)])
+        await self._call(self._client.set_payload, {"ready": False}, points=heads, wait=True)
+        records = await self._scroll_all(flt, with_payload=["chunk_index"])
+        records.sort(key=lambda r: r.payload.get("chunk_index") == 0)
+        # small batches let other chats through the single store thread
+        for start in range(0, len(records), _DELETE_BATCH):
+            ids = [r.id for r in records[start : start + _DELETE_BATCH]]
+            await self._call(self._client.delete, points_selector=qm.PointIdsList(points=ids))
 
     async def move_chat(self, old_chat_id: int, new_chat_id: int) -> None:
         await self._call(
