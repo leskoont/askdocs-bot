@@ -208,17 +208,33 @@ async def on_clear(
     if not await _is_admin(bot, chat, callback.from_user.id):
         await callback.answer(texts.ADMIN_ONLY, show_alert=True)
         return
-    if callback_data.confirm:
-        try:
-            removed = await rag.clear(chat.id)
-        except ChatBusyError:
-            await callback.answer(texts.BUSY, show_alert=True)
-            return
-        text = texts.CLEAR_DONE.format(count=removed)
-    else:
-        text = texts.CLEAR_CANCELLED
+    if not callback_data.confirm:
+        await callback.answer()
+        await _safe_edit(callback.message, texts.CLEAR_CANCELLED, None)
+        return
+    if rag.is_busy(chat.id):
+        await callback.answer(texts.BUSY, show_alert=True)
+        return
+
+    # A big chat takes longer to clear than Telegram waits for the callback answer.
     await callback.answer()
-    await _safe_edit(callback.message, text, None)
+    try:
+        await _safe_edit(callback.message, texts.CLEAR_PROGRESS, None)
+    except TelegramAPIError as exc:
+        log.debug("clear progress update failed", error=str(exc))
+    try:
+        text = texts.CLEAR_DONE.format(count=await rag.clear(chat.id))
+    except ChatBusyError:
+        text = texts.BUSY
+    except Exception:
+        log.exception("clear failed", chat_id=chat.id)
+        text = texts.ERROR
+    try:
+        await _safe_edit(callback.message, text, None)
+    except TelegramAPIError as exc:
+        log.warning("clear status edit failed", error=str(exc))
+        with suppress(TelegramAPIError):
+            await callback.message.answer(text)
 
 
 def docs_view(docs: list[DocumentInfo]) -> tuple[str, InlineKeyboardMarkup]:
