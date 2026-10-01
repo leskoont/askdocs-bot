@@ -36,7 +36,12 @@ class SentenceTransformerEmbedder:
         self._batch_size = batch_size
         self._query_prefix = query_prefix
         self._passage_prefix = passage_prefix
-        self.dimension: int = self._model.get_sentence_embedding_dimension()
+        # renamed in sentence-transformers 6
+        get_dimension = (
+            getattr(self._model, "get_embedding_dimension", None)
+            or self._model.get_sentence_embedding_dimension
+        )
+        self.dimension: int = get_dimension()
 
     @classmethod
     async def load(cls, model_name: str, **kwargs) -> "SentenceTransformerEmbedder":
