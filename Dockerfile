@@ -11,7 +11,7 @@ WORKDIR /app
 
 # CPU build of torch: the default wheel pulls ~2 GB of CUDA libraries,
 # and a small embedding model runs fine on CPU.
-RUN pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
 
 # Dependencies first, so that a code change does not reinstall them.
 COPY pyproject.toml ./
