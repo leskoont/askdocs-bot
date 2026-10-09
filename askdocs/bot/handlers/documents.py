@@ -1,4 +1,5 @@
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from html import escape
 
@@ -34,8 +35,6 @@ router = Router(name="documents")
 
 DOWNLOAD_TIMEOUT = 120
 PROGRESS_INTERVAL = 3.0
-# Telegram cuts callback popups at 200 characters.
-POPUP_NAME_LIMIT = 150
 LIST_NAME_LIMIT = 60
 
 
@@ -156,24 +155,25 @@ async def on_delete(
         await callback.answer(texts.ADMIN_ONLY, show_alert=True)
         return
 
-    docs = await rag.list_documents(chat.id)
-    doc = next((d for d in docs if d.doc_id == callback_data.doc_id), None)
-    try:
-        deleted = doc is not None and await rag.delete_document(chat.id, doc.doc_id)
-    except ChatBusyError:
+    if rag.is_busy(chat.id):
         await callback.answer(texts.BUSY, show_alert=True)
         return
-    if not deleted:
+    docs = await rag.list_documents(chat.id)
+    doc = next((d for d in docs if d.doc_id == callback_data.doc_id), None)
+    if doc is None:
         await callback.answer(texts.DELETE_NOT_FOUND)
-    else:
-        await callback.answer(texts.DELETED.format(name=_shorten(doc.file_name, POPUP_NAME_LIMIT)))
+        await _safe_edit(callback.message, *_listing(docs))
+        return
 
-    remaining = [d for d in docs if d.doc_id != callback_data.doc_id]
-    if remaining:
-        text, markup = docs_view(remaining)
-        await _safe_edit(callback.message, text, markup)
-    else:
-        await _safe_edit(callback.message, texts.NO_DOCS, None)
+    async def delete() -> tuple[str, InlineKeyboardMarkup | None]:
+        deleted = await rag.delete_document(chat.id, doc.doc_id)
+        done = texts.DELETED if deleted else texts.DELETE_NOT_FOUND
+        listing, markup = _listing(await rag.list_documents(chat.id))
+        return done.format(name=escape(doc.file_name)) + "\n\n" + listing, markup
+
+    await callback.answer()
+    progress = texts.DELETE_PROGRESS.format(name=escape(doc.file_name))
+    await _run_with_status(callback.message, progress, delete, "delete")
 
 
 @router.message(Command("clear"))
@@ -216,25 +216,43 @@ async def on_clear(
         await callback.answer(texts.BUSY, show_alert=True)
         return
 
-    # A big chat takes longer to clear than Telegram waits for the callback answer.
+    async def clear() -> tuple[str, None]:
+        return texts.CLEAR_DONE.format(count=await rag.clear(chat.id)), None
+
     await callback.answer()
+    await _run_with_status(callback.message, texts.CLEAR_PROGRESS, clear, "clear")
+
+
+async def _run_with_status(
+    message: Message,
+    progress: str,
+    action: Callable[[], Awaitable[tuple[str, InlineKeyboardMarkup | None]]],
+    name: str,
+) -> None:
+    # A big delete takes longer than Telegram waits for the callback answer,
+    # so the button is answered first and the outcome goes into the message.
     try:
-        await _safe_edit(callback.message, texts.CLEAR_PROGRESS, None)
+        await _safe_edit(message, progress, None)
     except TelegramAPIError as exc:
-        log.debug("clear progress update failed", error=str(exc))
+        log.debug("progress update failed", error=str(exc))
+    markup = None
     try:
-        text = texts.CLEAR_DONE.format(count=await rag.clear(chat.id))
+        text, markup = await action()
     except ChatBusyError:
         text = texts.BUSY
     except Exception:
-        log.exception("clear failed", chat_id=chat.id)
+        log.exception(f"{name} failed", chat_id=message.chat.id)
         text = texts.ERROR
     try:
-        await _safe_edit(callback.message, text, None)
+        await _safe_edit(message, text, markup)
     except TelegramAPIError as exc:
-        log.warning("clear status edit failed", error=str(exc))
+        log.warning("status edit failed", action=name, error=str(exc))
         with suppress(TelegramAPIError):
-            await callback.message.answer(text)
+            await message.answer(text, reply_markup=markup)
+
+
+def _listing(docs: list[DocumentInfo]) -> tuple[str, InlineKeyboardMarkup | None]:
+    return docs_view(docs) if docs else (texts.NO_DOCS, None)
 
 
 def docs_view(docs: list[DocumentInfo]) -> tuple[str, InlineKeyboardMarkup]:

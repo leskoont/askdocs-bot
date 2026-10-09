@@ -446,20 +446,21 @@ async def test_docs_list_and_delete_button(dp, bot, session, rag):
     assert [b.text for b in buttons] == ["Удалить 1. a.md", "Удалить 2. b.txt"]
 
     await dp.feed_update(bot, callback_update(buttons[0].callback_data))
-    assert popups(session)[0].text == texts.DELETED.format(name="a.md")
     edited = session.requests[-1]
     assert isinstance(edited, EditMessageText)
+    assert edited.text.startswith(texts.DELETED.format(name="a.md") + "\n\n")
     assert "1. b.txt" in edited.text
+    assert [b[0].text for b in edited.reply_markup.inline_keyboard] == ["Удалить 1. b.txt"]
     assert [d.file_name for d in await rag.list_documents(USER_ID)] == ["b.txt"]
 
 
-async def test_delete_popup_fits_telegram_limit(dp, bot, session):
-    name = "очень длинное имя файла " * 20 + ".txt"
-    await upload(dp, bot, session, name, "Текст про доставку.".encode())
-    await dp.feed_update(bot, message_update("/docs"))
-    button = session.requests[-1].reply_markup.inline_keyboard[0][0]
-    await dp.feed_update(bot, callback_update(button.callback_data))
-    assert len(popups(session)[0].text) <= 200
+async def test_deleting_the_last_document(dp, bot, session, rag):
+    await upload(dp, bot, session, "a&b.md", CONTRACT)
+    [doc] = await rag.list_documents(USER_ID)
+    await dp.feed_update(bot, callback_update(DeleteDoc(doc_id=doc.doc_id).pack()))
+    edited = session.requests[-1]
+    assert edited.text == texts.DELETED.format(name="a&amp;b.md") + "\n\n" + texts.NO_DOCS
+    assert edited.reply_markup is None
 
 
 def test_docs_list_fits_one_message():
@@ -480,45 +481,75 @@ async def test_buttons_during_upload(dp, bot, session, rag, button):
     assert len(await rag.list_documents(USER_ID)) == 1
 
 
-async def test_clear_answers_the_button_first(dp, bot, session, rag, monkeypatch):
-    # clearing a big chat can outlast the time Telegram gives to answer a callback
+# button -> (RagService method it runs, progress text, final text) with one a.md uploaded
+LONG_BUTTONS = {
+    "clear": ("clear", texts.CLEAR_PROGRESS, texts.CLEAR_DONE.format(count=1)),
+    "delete": (
+        "delete_document",
+        texts.DELETE_PROGRESS.format(name="a.md"),
+        texts.DELETED.format(name="a.md") + "\n\n" + texts.NO_DOCS,
+    ),
+}
+
+
+async def press(dp, bot, rag, button: str) -> None:
+    if button == "clear":
+        data = ClearDocs(confirm=True)
+    else:
+        [doc] = await rag.list_documents(USER_ID)
+        data = DeleteDoc(doc_id=doc.doc_id)
+    await dp.feed_update(bot, callback_update(data.pack()))
+
+
+@pytest.mark.parametrize("button", LONG_BUTTONS)
+async def test_button_is_answered_first(dp, bot, session, rag, monkeypatch, button):
+    # deleting a lot of chunks can outlast the time Telegram gives to answer a callback
+    method, progress_text, done_text = LONG_BUTTONS[button]
     await upload(dp, bot, session, "a.md", CONTRACT)
-    clear = rag.clear
+    run = getattr(rag, method)
     sent_before: list = []
 
-    async def watched(chat_id):
+    async def watched(*args):
         sent_before.extend(session.requests)
-        return await clear(chat_id)
+        return await run(*args)
 
-    monkeypatch.setattr(rag, "clear", watched)
+    monkeypatch.setattr(rag, method, watched)
     start = len(session.requests)
-    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack()))
+    await press(dp, bot, rag, button)
     answer, progress = sent_before[start:]
-    assert isinstance(answer, AnswerCallbackQuery)
-    assert progress.text == texts.CLEAR_PROGRESS and progress.reply_markup is None
-    assert session.texts()[-1] == texts.CLEAR_DONE.format(count=1)
+    assert isinstance(answer, AnswerCallbackQuery) and answer.text is None
+    assert progress.text == progress_text and progress.reply_markup is None
+    assert session.texts()[-1] == done_text
     assert len(popups(session)) == 1
 
 
-async def test_clear_reports_busy_after_answering(dp, bot, session, rag, monkeypatch):
-    async def busy(chat_id):
+@pytest.mark.parametrize("button", LONG_BUTTONS)
+async def test_button_reports_busy_after_answering(dp, bot, session, rag, monkeypatch, button):
+    async def busy(*args):
         raise ChatBusyError
 
-    monkeypatch.setattr(rag, "clear", busy)
-    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack()))
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    monkeypatch.setattr(rag, LONG_BUTTONS[button][0], busy)
+    await press(dp, bot, rag, button)
     assert session.texts()[-1] == texts.BUSY
+    assert len(popups(session)) == 1
 
 
-async def test_clear_failure_is_reported_in_the_message(dp, bot, session, rag, monkeypatch):
-    async def broken(chat_id):
+@pytest.mark.parametrize("button", LONG_BUTTONS)
+async def test_button_failure_is_reported_in_the_message(
+    dp, bot, session, rag, monkeypatch, button
+):
+    async def broken(*args):
         raise RuntimeError("store is down")
 
-    monkeypatch.setattr(rag, "clear", broken)
-    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack()))
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    monkeypatch.setattr(rag, LONG_BUTTONS[button][0], broken)
+    await press(dp, bot, rag, button)
     assert session.texts()[-1] == texts.ERROR
     assert len(popups(session)) == 1
 
 
+@pytest.mark.parametrize("button", LONG_BUTTONS)
 @pytest.mark.parametrize(
     "error",
     [
@@ -527,7 +558,7 @@ async def test_clear_failure_is_reported_in_the_message(dp, bot, session, rag, m
     ],
     ids=["flood", "deleted"],
 )
-async def test_clear_edit_failure_falls_back_to_new_message(dp, bot, session, rag, error):
+async def test_button_edit_failure_falls_back_to_new_message(dp, bot, session, rag, error, button):
     await upload(dp, bot, session, "a.md", CONTRACT)
     make_request = session.make_request
 
@@ -537,10 +568,28 @@ async def test_clear_edit_failure_falls_back_to_new_message(dp, bot, session, ra
         return await make_request(bot, method, **kwargs)
 
     session.make_request = no_edits
-    await dp.feed_update(bot, callback_update(ClearDocs(confirm=True).pack()))
+    await press(dp, bot, rag, button)
     sent = [r.text for r in session.requests if isinstance(r, SendMessage)]
-    assert sent[-1] == texts.CLEAR_DONE.format(count=1)
+    assert sent[-1] == LONG_BUTTONS[button][2]
     assert await rag.list_documents(USER_ID) == []
+
+
+async def test_delete_fallback_keeps_the_buttons(dp, bot, session, rag):
+    await upload(dp, bot, session, "a.md", CONTRACT)
+    await upload(dp, bot, session, "b.txt", "Второй документ про доставку.".encode())
+    make_request = session.make_request
+
+    async def no_edits(bot, method, **kwargs):
+        if isinstance(method, EditMessageText):
+            raise TelegramBadRequest(method, "message to edit not found")
+        return await make_request(bot, method, **kwargs)
+
+    session.make_request = no_edits
+    doc = next(d for d in await rag.list_documents(USER_ID) if d.file_name == "a.md")
+    await dp.feed_update(bot, callback_update(DeleteDoc(doc_id=doc.doc_id).pack()))
+    sent = session.requests[-1]
+    assert isinstance(sent, SendMessage)
+    assert [b[0].text for b in sent.reply_markup.inline_keyboard] == ["Удалить 1. b.txt"]
 
 
 async def test_delete_button_for_missing_document(dp, bot, session):
