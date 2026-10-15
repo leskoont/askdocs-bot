@@ -6,7 +6,7 @@ Telegram-бот, который отвечает на вопросы по при
 
 ## Пример
 
-Прогон `scripts/ask.py` на договоре из [`examples/dogovor-uslug.md`](examples/dogovor-uslug.md), модель `qwen2.5:7b-instruct` через Ollama:
+Прогон `scripts/ask.py` на договоре из [`examples/dogovor-uslug.md`](examples/dogovor-uslug.md), модель `minimax/minimax-m3.1-flash:free` через OpenRouter:
 
 ```
 $ python scripts/ask.py examples/dogovor-uslug.md \
@@ -14,7 +14,7 @@ $ python scripts/ask.py examples/dogovor-uslug.md \
     "Какая пеня за просрочку работ у исполнителя?" \
     "Кто генеральный директор Заказчика?"
 indexed dogovor-uslug.md: 10 chunks
-llm: qwen2.5:7b-instruct at http://localhost:11434/v1
+llm: minimax/minimax-m3.1-flash:free at https://openrouter.ai/api/v1
 
 Q: Какой размер предоплаты и в какой срок её нужно внести?
 A: Предоплата составляет 90 000 рублей (50% стоимости) и вносится в течение 5 банковских дней после подписания договора. [1]
