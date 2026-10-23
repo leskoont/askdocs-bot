@@ -6,7 +6,7 @@ Embeddings are computed locally with `intfloat/multilingual-e5-small`, fragments
 
 ## Example
 
-A run of `scripts/ask.py` on the service contract in [`examples/dogovor-uslug.md`](examples/dogovor-uslug.md), model `minimax/minimax-m3.1-flash:free` through OpenRouter. The contract and the questions are in Russian. The questions ask for the prepayment amount and deadline, the contractor's late-work penalty, and the customer's CEO. The last answer means "The uploaded documents contain no answer to this question."
+A run of `scripts/ask.py` on the service contract in [`examples/dogovor-uslug.md`](examples/dogovor-uslug.md), model `minimax/minimax-m3.1-flash` through OpenRouter. The contract and the questions are in Russian. The questions ask for the prepayment amount and deadline, the contractor's late-work penalty, and the customer's CEO. The last answer means "The uploaded documents contain no answer to this question."
 
 ```
 $ python scripts/ask.py examples/dogovor-uslug.md \
@@ -14,7 +14,7 @@ $ python scripts/ask.py examples/dogovor-uslug.md \
     "Какая пеня за просрочку работ у исполнителя?" \
     "Кто генеральный директор Заказчика?"
 indexed dogovor-uslug.md: 10 chunks
-llm: minimax/minimax-m3.1-flash:free at https://openrouter.ai/api/v1
+llm: minimax/minimax-m3.1-flash at https://openrouter.ai/api/v1
 
 Q: Какой размер предоплаты и в какой срок её нужно внести?
 A: Предоплата составляет 90 000 рублей (50% стоимости) и вносится в течение 5 банковских дней после подписания договора. [1]
